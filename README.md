@@ -1,50 +1,65 @@
 # QCP Benchmark
 
-**QCP vs KCP vs TCP vs UDP — 性能压测**
+**QCP vs KCP — 真实网络压测（拒绝 loopback Optimistic 路径）**
 
-> KCP 代码在 `baseline_kcp.go` 中，**仅作压测对照基线**，不是 QCP 的组件或依赖。
+> KCP 在 `baseline_kcp.go`，**仅作压测基线**，不是 QCP 组件。
 
-## 核心结论
+## 验证层级
 
-QCP 在 P50/P99 延迟上**完全吊打 KCP**（5G 模拟 RTT 下 Fast NACK vs KCP RTO）。
+| 层级 | 命令 | 网络 |
+|------|------|------|
+| **CI 快速门** | `go test -run Simulated` / `-verify` | 纯模型，无 socket、**无 loopback** |
+| **最终 Docker** | `.\scripts\verify-docker.ps1` | `10.10.0.0/24` bridge + **tc/netem** |
+| **最终本机网卡** | `.\scripts\verify-host.ps1` | 绑定 LAN IP，**拒绝 127.0.0.1** |
 
-| 丢包率 | KCP P50 | QCP P50 | 提升 |
-|--------|---------|---------|------|
-| 0% | ~97ms | ~1.7ms | **↓98%** |
-| 5% | ~98ms | ~1.7ms | **↓98%** |
-| 10% | ~100ms | ~1.7ms | **↓98%** |
+`-verify-net` 使用真实 UDP（`qcp-lib-go` :9003），**禁止 loopback**。  
+判定：**P50 为主**（QCP ≤ KCP+5%）；丢包 ≥3% 场景额外检查 P99。
 
-## 快速开始
-
-```bash
-go run . -mode all -duration 5s -loss 0.05
-```
-
-Docker:
+## 快速 CI（仿真）
 
 ```bash
-docker-compose up -d server
-docker-compose run --rm client -mode client -server 10.10.0.10:9000 -protocol all -duration 5s
+go test ./... -run Simulated -count=1
+go run . -verify -duration 2s -connections 10
 ```
 
-## 文件说明
+## 最终验证 — Docker（推荐）
 
-| 文件 | 说明 |
+```bash
+bash scripts/verify-docker.sh 20 5s
+```
+
+- Server: `10.10.0.10`（`qcp-lib-go` 官方栈 `:9003`）
+- Client: `10.10.0.20` + `netem.sh` 按场景注入 delay/loss
+- `-verify-net` 拒绝 loopback
+
+单场景：
+
+```bash
+docker compose up -d server
+docker compose run --rm -e SCENARIO=wifi client \
+  -verify-net -server 10.10.0.10:9000 -scenario wifi -duration 5s
+```
+
+## 最终验证 — 本机网卡
+
+```powershell
+cd qcp-benchmark
+.\scripts\verify-host.ps1 -Connections 20 -Duration 5s
+```
+
+```bash
+bash scripts/verify-host.sh 20 5s
+```
+
+## 架构
+
+| 端口 | 协议 |
 |------|------|
-| `main.go` | QCP / TCP / UDP 压测 |
-| `baseline_kcp.go` | **KCP 基线对手（测试专用）** |
-
-## QCP vs KCP 架构差异
-
-| 维度 | KCP (基线) | QCP |
-|------|-----------|-----|
-| 丢包恢复 | RTO 8-20ms | Fast NACK ~5ms |
-| 状态数据 | 可靠重传 | REALTIME 最新覆盖 |
-| 场景 | 通用 | 游戏 / IoT |
-| 并发 | ~10K | 100K+ Lock-Free |
-
-详见 [docs/BASELINE.md](../docs/BASELINE.md)
+| 9000 | TCP echo |
+| 9001 | UDP echo |
+| 9002 | KCP 基线 echo |
+| 9003 | **QCP 官方库** (`qcp-lib-go`) |
 
 ## License
 
-MIT License
+MIT

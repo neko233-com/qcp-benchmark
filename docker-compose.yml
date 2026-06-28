@@ -1,17 +1,17 @@
 services:
   server:
     build:
-      context: .
-      dockerfile: Dockerfile.server
+      context: ..
+      dockerfile: qcp-benchmark/Dockerfile.server
     networks:
       qcp-net:
         ipv4_address: 10.10.0.10
-    command: ["-mode", "server"]
+    command: ["-mode", "server", "-bind", "0.0.0.0"]
 
   client:
     build:
-      context: .
-      dockerfile: Dockerfile.client
+      context: ..
+      dockerfile: qcp-benchmark/Dockerfile.client
     networks:
       qcp-net:
         ipv4_address: 10.10.0.20
@@ -19,7 +19,16 @@ services:
       - server
     cap_add:
       - NET_ADMIN
-    command: ["-server", "10.10.0.10:9000"]
+    environment:
+      SCENARIO: lan
+    command:
+      [
+        "-verify-net",
+        "-server", "10.10.0.10:9000",
+        "-scenario", "lan",
+        "-duration", "5s",
+        "-connections", "20",
+      ]
 
 networks:
   qcp-net:

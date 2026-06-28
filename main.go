@@ -75,6 +75,7 @@ func UnmarshalQCP(data []byte) *QCPPacket {
 type Config struct {
 	Mode        string
 	Server      string
+	BindAddr    string
 	Protocol    string
 	Scenario    string
 	Duration    time.Duration
@@ -110,12 +111,16 @@ func main() {
 	payload := flag.Int("payload", 256, "Payload size")
 	loss := flag.Float64("loss", 0, "Packet loss rate")
 	scenario := flag.String("scenario", "lan", "Network scenario: lan, wifi, 4g, 3g, congested, extreme")
-	verify := flag.Bool("verify", false, "Verify QCP beats KCP on all network scenarios")
+	verify := flag.Bool("verify", false, "Fast simulated verify (no loopback, no sockets)")
+	verifyNet := flag.Bool("verify-net", false, "Real-network verify via Docker bridge or LAN NIC")
+	verifyNetAll := flag.Bool("verify-net-all", false, "Run verify-net for all scenarios (apply netem between runs in Docker)")
+	bind := flag.String("bind", "0.0.0.0", "Server bind address (use 0.0.0.0 for Docker/NIC)")
 	flag.Parse()
 
 	cfg := Config{
 		Mode:        *mode,
 		Server:      *server,
+		BindAddr:    *bind,
 		Protocol:    *protocol,
 		Scenario:    *scenario,
 		Duration:    *duration,
@@ -124,8 +129,20 @@ func main() {
 		PacketLoss:  *loss,
 	}
 
+	if *verifyNetAll {
+		if err := runVerifyNetAll(cfg); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+	if *verifyNet {
+		if err := runVerifyNet(cfg); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	if *verify {
-		if err := runVerifyAll(cfg); err != nil {
+		if err := runVerifySimulated(cfg); err != nil {
 			os.Exit(1)
 		}
 		return
@@ -206,21 +223,8 @@ func runServer(cfg Config) {
 		}
 	}()
 
-	// QCP echo (TLB + Fast NACK)
-	go func() {
-		addr, _ := net.ResolveUDPAddr("udp", ":9003")
-		conn, _ := net.ListenUDP("udp", addr)
-		fmt.Println("[QCP] :9003")
-		buf := make([]byte, cfg.PayloadSize+64)
-		for {
-			n, raddr, err := conn.ReadFromUDP(buf)
-			if err != nil {
-				continue
-			}
-			// QCP: minimal parse overhead (TLB path)
-			conn.WriteToUDP(buf[:n], raddr)
-		}
-	}()
+	// QCP echo — official qcp-lib-go on all interfaces
+	startQCPServerNet(net.JoinHostPort(cfg.BindAddr, "9003"))
 
 	fmt.Println("Server ready.")
 	select {}
@@ -266,9 +270,15 @@ func runBench(protocol string, cfg Config) Result {
 	case "udp":
 		return benchUDP(cfg)
 	case "kcp":
+		if cfg.Server != "" && !isLoopbackHost(hostFromServer(cfg.Server)) {
+			return benchKCPNet(cfg)
+		}
 		return benchKCP(cfg)
 	case "qcp":
-		return benchQCPLib(cfg, profileByName(cfg.Scenario))
+		if cfg.Server != "" && !isLoopbackHost(hostFromServer(cfg.Server)) {
+			return benchQCPLibNet(cfg)
+		}
+		return benchQCPSimulated(cfg, profileByName(cfg.Scenario))
 	}
 	return Result{}
 }

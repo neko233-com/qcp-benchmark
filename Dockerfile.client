@@ -1,13 +1,17 @@
 FROM golang:1.22-alpine AS builder
-WORKDIR /app
-COPY go.mod ./
+WORKDIR /src
+COPY qcp-lib-go/go.mod qcp-lib-go/go.sum* /src/qcp-lib-go/
+COPY qcp-lib-go/qcp/ /src/qcp-lib-go/qcp/
+COPY qcp-benchmark/go.mod qcp-benchmark/go.sum* /src/qcp-benchmark/
+WORKDIR /src/qcp-benchmark
 RUN go mod download
-COPY *.go ./
+COPY qcp-benchmark/*.go /src/qcp-benchmark/
 RUN CGO_ENABLED=0 GOOS=linux go build -o /client .
 
 FROM alpine:3.19
-RUN apk add --no-cache iproute2 iptables bash
+RUN apk add --no-cache iproute2 bash
 COPY --from=builder /client /client
-COPY netem.sh /netem.sh
-RUN chmod +x /netem.sh
-ENTRYPOINT ["/client"]
+COPY qcp-benchmark/netem.sh /netem.sh
+COPY qcp-benchmark/entrypoint-client.sh /entrypoint-client.sh
+RUN chmod +x /netem.sh /entrypoint-client.sh
+ENTRYPOINT ["/entrypoint-client.sh"]
