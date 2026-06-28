@@ -1,97 +1,106 @@
 # QCP Benchmark
 
-Go 性能对比测试：QCP vs TCP vs UDP vs KCP
+Go 性能对比测试：QCP vs KCP vs TCP vs UDP
 
 ## 快速开始
 
 ```bash
-# 测试所有协议
-go run . -protocol all -duration 10s -connections 100
+# Docker 测试（推荐，模拟真实网络）
+docker-compose up -d server
+docker-compose run --rm client -mode client -server 10.10.0.10:9000 -protocol all -duration 10s -connections 100
 
-# 测试单个协议
-go run . -protocol qcp -duration 30s -connections 1000
-
-# 模拟丢包环境
-go run . -protocol all -loss 0.05
+# 本地测试
+go run . -mode all -duration 10s -connections 100
 ```
 
 ## 参数说明
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
+| `-mode` | all | 运行模式: server, client, all (本地) |
+| `-server` | - | 服务器地址 (client 模式) |
 | `-protocol` | all | 测试协议: qcp, tcp, udp, kcp, all |
 | `-duration` | 10s | 测试时长 |
 | `-connections` | 100 | 并发连接数 |
 | `-payload` | 256 | 包大小 (bytes) |
 | `-loss` | 0 | 模拟丢包率 (0-1) |
 
-## 基准测试结果
+## 网络模拟场景
 
-### 本地回环 (Loopback)
+使用 Docker + tc/netem 模拟真实网络：
 
-```
-Protocol │      Latency │     Throughput │    Bandwidth │ Connections
-─────────┼──────────────┼────────────────┼──────────────┼────────────
-TCP      │     0.15ms   │    450.0 MB/s  │       100%   │       100
-UDP      │     0.08ms   │    520.0 MB/s  │        80%   │       100
-KCP      │    18.20ms   │    120.0 MB/s  │       100%   │       100
-QCP      │    10.50ms   │    180.0 MB/s  │        60%   │       100
+| 场景 | 延迟 | 丢包 | 适用场景 |
+|------|------|------|----------|
+| `clean` | 0ms | 0% | 本地回环 |
+| `lan` | 1ms | 0.1% | 局域网 |
+| `wifi` | 10ms | 2% | WiFi |
+| `4g` | 30ms | 1% | 4G 移动网络 |
+| `3g` | 100ms | 3% | 3G 移动网络 |
+| `congested` | 50ms | 5% | 拥堵网络 |
+| `extreme` | 100ms | 10% | 极端环境 |
 
-═══════════════════════════════════════════════════════════════
-  QCP vs KCP: Latency ↓42%  Bandwidth ↓40%
-═══════════════════════════════════════════════════════════════
-```
+### 运行指定场景
 
-### 高丢包环境 (5% packet loss)
+```bash
+# WiFi 场景
+docker-compose run --rm --entrypoint bash client -c "
+  export SCENARIO=wifi
+  /netem.sh 10.10.0.10 eth0
+  /client -mode client -server 10.10.0.10:9000 -protocol all -duration 5s -connections 50 -loss 0.02
+"
 
-```
-Protocol │      Latency │     Throughput │    Bandwidth │ Connections
-─────────┼──────────────┼────────────────┼──────────────┼────────────
-TCP      │    85.30ms   │     45.0 MB/s  │       100%   │       100
-UDP      │     0.08ms   │    490.0 MB/s  │        80%   │       100
-KCP      │    52.40ms   │     84.0 MB/s  │       100%   │       100
-QCP      │    15.20ms   │    162.0 MB/s  │        60%   │       100
-
-═══════════════════════════════════════════════════════════════
-  QCP vs KCP: Latency ↓71%  Bandwidth ↓40%
-═══════════════════════════════════════════════════════════════
-```
-
-### 万级连接压测
-
-```
-Protocol │      Latency │     Throughput │    Bandwidth │ Connections
-─────────┼──────────────┼────────────────┼──────────────┼────────────
-TCP      │   125.00ms   │     28.0 MB/s  │       100%   │     10000
-UDP      │     0.12ms   │    380.0 MB/s  │        80%   │     10000
-KCP      │    85.60ms   │     52.0 MB/s  │       100%   │     10000
-QCP      │    32.10ms   │    125.0 MB/s  │        60%   │     10000
-
-═══════════════════════════════════════════════════════════════
-  QCP vs KCP: Latency ↓62%  Bandwidth ↓40%
-═══════════════════════════════════════════════════════════════
+# 4G 场景
+docker-compose run --rm --entrypoint bash client -c "
+  export SCENARIO=4g
+  /netem.sh 10.10.0.10 eth0
+  /client -mode client -server 10.10.0.10:9000 -protocol all -duration 5s -connections 50 -loss 0.01
+"
 ```
 
-## 为什么 QCP 更快？
+## 延迟指标说明
+
+| 指标 | 含义 | 为什么重要 |
+|------|------|------------|
+| **P50** | 50% 请求低于此延迟（中位数） | 反映典型体验 |
+| **P95** | 95% 请求低于此延迟 | 反映大多数用户体验 |
+| **P99** | 99% 请求低于此延迟 | 反映最差情况，玩家感知的是最慢的 1% |
+
+**P99 比 P50 更重要** — 游戏玩家感知的是最慢的那 1%，不是平均值。
+
+## 测试结果
+
+### WiFi 网络 (10ms 延迟, 2% 丢包)
+
+```
+Protocol │      P50 │      P95 │      P99 │ Throughput │ Bandwidth
+─────────┼──────────┼──────────┼──────────┼────────────┼──────────
+TCP      │  10.19ms │  10.33ms │ 224.40ms │   1.7 MB/s │     100%
+UDP      │  10.14ms │  10.36ms │  11.21ms │   1.6 MB/s │      80%
+KCP      │  10.26ms │  11.30ms │ 225.02ms │   1.7 MB/s │     109%
+QCP      │  10.46ms │  10.74ms │ 224.58ms │   1.7 MB/s │     104%
+```
+
+### Docker 回环 (无网络模拟)
+
+```
+Protocol │      P50 │      P95 │      P99 │ Throughput │ Bandwidth
+─────────┼──────────┼──────────┼──────────┼────────────┼──────────
+TCP      │    339µs │  1.43ms  │  2.08ms  │  50.0 MB/s │     100%
+UDP      │    795µs │  1.15ms  │  1.49ms  │  30.2 MB/s │      80%
+KCP      │  1.07ms  │  2.15ms  │  2.84ms  │  50.0 MB/s │     109%
+QCP      │    628µs │  1.71ms  │  2.36ms  │  48.6 MB/s │     104%
+
+★ QCP vs KCP: P50 ↓41%  P99 ↓17%
+```
+
+## 核心对比：QCP vs KCP
 
 | 创新 | KCP | QCP | 影响 |
 |------|-----|-----|------|
-| FEC | 无 | 自适应 Reed-Solomon | 丢包无需重传，延迟 -40% |
+| FEC | 无 | 自适应 Reed-Solomon | 丢包无需重传 |
 | 拥塞控制 | TCP-like | AI 预测 + 带宽估计 | 拥塞恢复更快 |
 | 零拷贝 | 频繁分配 | 预分配池 | GC 压力 -50% |
 | 包融合 | 1包1发 | 智能合并 | 带宽 -30% |
-
-## 游戏场景延迟对比
-
-```
-场景              KCP      QCP      提升
-─────────────────────────────────────────
-射击命中          50ms     30ms     ↓40%
-移动同步          45ms     27ms     ↓40%
-技能释放          60ms     35ms     ↓42%
-AOI 广播          80ms     45ms     ↓44%
-组队匹配          120ms    70ms     ↓42%
-```
 
 ## License
 

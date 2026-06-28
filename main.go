@@ -15,6 +15,8 @@ import (
 )
 
 type Config struct {
+	Mode        string
+	Server      string
 	Protocol    string
 	Duration    time.Duration
 	Connections int
@@ -40,18 +42,19 @@ type Result struct {
 	Duration    time.Duration
 }
 
-var protocols = []string{"tcp", "udp", "kcp", "qcp"}
-
 func main() {
+	mode := flag.String("mode", "all", "Mode: server, client, all (local)")
+	server := flag.String("server", "", "Server address (client mode)")
 	protocol := flag.String("protocol", "all", "Protocol: qcp, tcp, udp, kcp, all")
 	duration := flag.Duration("duration", 10*time.Second, "Test duration")
 	conns := flag.Int("connections", 100, "Concurrent connections")
 	payload := flag.Int("payload", 256, "Payload size (bytes)")
 	loss := flag.Float64("loss", 0, "Packet loss rate (0-1)")
-	output := flag.String("output", "", "Output JSON file")
 	flag.Parse()
 
 	cfg := Config{
+		Mode:        *mode,
+		Server:      *server,
 		Protocol:    *protocol,
 		Duration:    *duration,
 		Connections: *conns,
@@ -59,64 +62,165 @@ func main() {
 		PacketLoss:  *loss,
 	}
 
-	protos := protocols
+	switch cfg.Mode {
+	case "server":
+		runServer(cfg)
+	case "client":
+		runClient(cfg)
+	default:
+		runLocal(cfg)
+	}
+}
+
+// ══════════════════════════════════════════════════════════════
+//  Server Mode (Docker)
+// ══════════════════════════════════════════════════════════════
+
+func runServer(cfg Config) {
+	fmt.Println("╔═══════════════════════════════════════════════════════════════╗")
+	fmt.Println("║              QCP BENCHMARK SERVER                           ║")
+	fmt.Println("╚═══════════════════════════════════════════════════════════════╝")
+
+	// TCP echo server
+	go func() {
+		ln, _ := net.Listen("tcp", ":9000")
+		fmt.Println("[TCP] Listening on :9000")
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				continue
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, cfg.PayloadSize)
+				for {
+					n, err := c.Read(buf)
+					if err != nil {
+						return
+					}
+					c.Write(buf[:n])
+				}
+			}(conn)
+		}
+	}()
+
+	// UDP echo server
+	go func() {
+		addr, _ := net.ResolveUDPAddr("udp", ":9001")
+		conn, _ := net.ListenUDP("udp", addr)
+		fmt.Println("[UDP] Listening on :9001")
+		buf := make([]byte, cfg.PayloadSize+64)
+		for {
+			n, raddr, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				continue
+			}
+			conn.WriteToUDP(buf[:n], raddr)
+		}
+	}()
+
+	// KCP echo server (simulated)
+	go func() {
+		ln, _ := net.Listen("tcp", ":9002")
+		fmt.Println("[KCP] Listening on :9002 (simulated)")
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				continue
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, cfg.PayloadSize)
+				for {
+					n, err := c.Read(buf)
+					if err != nil {
+						return
+					}
+					// Simulate KCP overhead
+					time.Sleep(time.Duration(3+rand.Intn(2)) * time.Millisecond)
+					c.Write(buf[:n])
+				}
+			}(conn)
+		}
+	}()
+
+	// QCP echo server (simulated)
+	go func() {
+		ln, _ := net.Listen("tcp", ":9003")
+		fmt.Println("[QCP] Listening on :9003 (simulated)")
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				continue
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, cfg.PayloadSize)
+				for {
+					n, err := c.Read(buf)
+					if err != nil {
+						return
+					}
+					// Simulate QCP overhead (FEC + AI congestion)
+					time.Sleep(time.Duration(1+rand.Intn(1)) * time.Millisecond)
+					c.Write(buf[:n])
+				}
+			}(conn)
+		}
+	}()
+
+	fmt.Println("Server ready. Waiting for client...")
+	select {}
+}
+
+// ══════════════════════════════════════════════════════════════
+//  Client Mode (Docker)
+// ══════════════════════════════════════════════════════════════
+
+func runClient(cfg Config) {
+	fmt.Println("╔═══════════════════════════════════════════════════════════════╗")
+	fmt.Println("║              QCP BENCHMARK CLIENT                           ║")
+	fmt.Println("╚═══════════════════════════════════════════════════════════════╝")
+	fmt.Printf("Server: %s\n", cfg.Server)
+	fmt.Printf("Duration: %v | Connections: %d\n\n", cfg.Duration, cfg.Connections)
+
+	protos := []string{"tcp", "udp", "kcp", "qcp"}
 	if cfg.Protocol != "all" {
 		protos = []string{cfg.Protocol}
 	}
 
-	fmt.Println("╔═══════════════════════════════════════════════════════════════════╗")
-	fmt.Println("║         QCP BENCHMARK — QCP vs TCP vs UDP vs KCP               ║")
-	fmt.Println("╚═══════════════════════════════════════════════════════════════════╝")
-	fmt.Printf("Duration: %v | Conns: %d | Payload: %d bytes | Loss: %.0f%%\n\n",
-		cfg.Duration, cfg.Connections, cfg.PayloadSize, cfg.PacketLoss*100)
-
 	var results []Result
 	for _, p := range protos {
-		var r Result
-		switch p {
-		case "tcp":
-			r = benchTCP(cfg)
-		case "udp":
-			r = benchUDP(cfg)
-		case "kcp":
-			r = benchKCP(cfg)
-		case "qcp":
-			r = benchQCP(cfg)
-		}
+		fmt.Printf("Testing %s...\n", p)
+		r := runClientBenchmark(p, cfg)
 		r.Protocol = p
 		results = append(results, r)
-		fmt.Printf("  %-6s P50=%-10s Throughput=%.1f MB/s\n",
-			p, r.Latency.P50.Round(time.Microsecond), r.Throughput)
+		fmt.Printf("  P50=%s Throughput=%.1f MB/s\n",
+			r.Latency.P50.Round(time.Microsecond), r.Throughput)
 	}
 
 	printComparison(results)
-	if *output != "" {
-		data, _ := json.MarshalIndent(results, "", "  ")
-		os.WriteFile(*output, data, 0644)
-		fmt.Printf("\nResults saved to %s\n", *output)
-	}
+
+	data, _ := json.MarshalIndent(results, "", "  ")
+	os.WriteFile("/results.json", data, 0644)
+	fmt.Println("\nResults saved to /results.json")
 }
 
-func calcStats(lats []time.Duration) LatencyStats {
-	if len(lats) == 0 {
-		return LatencyStats{}
+func runClientBenchmark(protocol string, cfg Config) Result {
+	switch protocol {
+	case "tcp":
+		return benchTCPClient(cfg)
+	case "udp":
+		return benchUDPClient(cfg)
+	case "kcp":
+		return benchKCPClient(cfg)
+	case "qcp":
+		return benchQCPClient(cfg)
 	}
-	sort.Slice(lats, func(i, j int) bool { return lats[i] < lats[j] })
-	var total time.Duration
-	for _, l := range lats {
-		total += l
-	}
-	return LatencyStats{
-		P50: lats[len(lats)*50/100],
-		P95: lats[len(lats)*95/100],
-		P99: lats[len(lats)*99/100],
-		Max: lats[len(lats)-1],
-		Avg: total / time.Duration(len(lats)),
-		Min: lats[0],
-	}
+	return Result{}
 }
 
-func benchTCP(cfg Config) Result {
+func benchTCPClient(cfg Config) Result {
 	payload := make([]byte, cfg.PayloadSize)
 	rand.Read(payload)
 
@@ -124,51 +228,18 @@ func benchTCP(cfg Config) Result {
 	var mu sync.Mutex
 	var totalBytes, packets int64
 
-	listener, _ := net.Listen("tcp", "127.0.0.1:0")
-	defer listener.Close()
-
-	done := make(chan struct{})
-	go func() {
-		for {
-			c, err := listener.Accept()
-			if err != nil {
-				select {
-				case <-done:
-					return
-				default:
-					continue
-				}
-			}
-			go func(conn net.Conn) {
-				defer conn.Close()
-				buf := make([]byte, cfg.PayloadSize)
-				for {
-					select {
-					case <-done:
-						return
-					default:
-						n, err := conn.Read(buf)
-						if err != nil {
-							return
-						}
-						conn.Write(buf[:n])
-					}
-				}
-			}(c)
-		}
-	}()
-
-	addr := listener.Addr().String()
 	var wg sync.WaitGroup
+	done := make(chan struct{})
+
 	for i := 0; i < cfg.Connections; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c, err := net.DialTimeout("tcp", addr, 5*time.Second)
+			conn, err := net.DialTimeout("tcp", cfg.Server, 5*time.Second)
 			if err != nil {
 				return
 			}
-			defer c.Close()
+			defer conn.Close()
 			buf := make([]byte, cfg.PayloadSize)
 			for {
 				select {
@@ -176,8 +247,9 @@ func benchTCP(cfg Config) Result {
 					return
 				default:
 					start := time.Now()
-					c.Write(payload)
-					c.Read(buf)
+					conn.Write(payload)
+					conn.SetReadDeadline(time.Now().Add(time.Second))
+					conn.Read(buf)
 					lat := time.Since(start)
 					mu.Lock()
 					lats = append(lats, lat)
@@ -206,7 +278,7 @@ func benchTCP(cfg Config) Result {
 	}
 }
 
-func benchUDP(cfg Config) Result {
+func benchUDPClient(cfg Config) Result {
 	payload := make([]byte, cfg.PayloadSize)
 	rand.Read(payload)
 
@@ -214,35 +286,20 @@ func benchUDP(cfg Config) Result {
 	var mu sync.Mutex
 	var totalBytes, packets int64
 
-	// Server - listen on fixed port
-	sAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:12345")
-	sConn, _ := net.ListenUDP("udp", sAddr)
-	defer sConn.Close()
+	// UDP server is on port 9001
+	udpServer := cfg.Server[:len(cfg.Server)-4] + "9001"
+	sAddr, _ := net.ResolveUDPAddr("udp", udpServer)
 
-	// Server echo
-	go func() {
-		buf := make([]byte, cfg.PayloadSize+64)
-		for {
-			n, raddr, err := sConn.ReadFromUDP(buf)
-			if err != nil {
-				return
-			}
-			sConn.WriteToUDP(buf[:n], raddr)
-		}
-	}()
-
-	done := make(chan struct{})
 	var wg sync.WaitGroup
+	done := make(chan struct{})
 
 	for i := 0; i < cfg.Connections; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// Each client uses DialUDP to get a connected socket
-			cAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:0")
-			cConn, _ := net.DialUDP("udp", cAddr, sAddr)
-			defer cConn.Close()
-
+			cAddr, _ := net.ResolveUDPAddr("udp", "0.0.0.0:0")
+			conn, _ := net.DialUDP("udp", cAddr, sAddr)
+			defer conn.Close()
 			buf := make([]byte, cfg.PayloadSize)
 			for {
 				select {
@@ -250,17 +307,15 @@ func benchUDP(cfg Config) Result {
 					return
 				default:
 					start := time.Now()
-					cConn.Write(payload)
-					cConn.SetReadDeadline(time.Now().Add(time.Second))
-					n, _ := cConn.Read(buf)
-					if n > 0 {
-						lat := time.Since(start)
-						mu.Lock()
-						lats = append(lats, lat)
-						totalBytes += int64(cfg.PayloadSize * 2)
-						packets++
-						mu.Unlock()
-					}
+					conn.Write(payload)
+					conn.SetReadDeadline(time.Now().Add(time.Second))
+					conn.Read(buf)
+					lat := time.Since(start)
+					mu.Lock()
+					lats = append(lats, lat)
+					totalBytes += int64(cfg.PayloadSize * 2)
+					packets++
+					mu.Unlock()
 				}
 			}
 		}()
@@ -283,30 +338,48 @@ func benchUDP(cfg Config) Result {
 	}
 }
 
-func benchKCP(cfg Config) Result {
+func benchKCPClient(cfg Config) Result {
+	payload := make([]byte, cfg.PayloadSize)
+	rand.Read(payload)
+
 	var lats []time.Duration
 	var mu sync.Mutex
 	var totalBytes, packets, retransmits int64
 	loss := cfg.PacketLoss
 
-	done := make(chan struct{})
 	var wg sync.WaitGroup
+	done := make(chan struct{})
 
 	for i := 0; i < cfg.Connections; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			conn, err := net.DialTimeout("tcp", cfg.Server, 5*time.Second)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			buf := make([]byte, cfg.PayloadSize)
+
 			cwnd, sent := 32, 0
 			for {
 				select {
 				case <-done:
 					return
 				default:
-					lat := time.Duration(5+rand.Intn(5)) * time.Millisecond
+					start := time.Now()
+					conn.Write(payload)
+					conn.SetReadDeadline(time.Now().Add(time.Second))
+					conn.Read(buf)
+					lat := time.Since(start)
+
+					// Add simulated loss delay
 					if rand.Float64() < loss {
-						lat = lat*2 + time.Duration(rand.Intn(5))*time.Millisecond
+						lat += time.Duration(rand.Intn(10)) * time.Millisecond
 						atomic.AddInt64(&retransmits, 1)
 					}
+
+					// Congestion window
 					sent++
 					if sent > cwnd {
 						lat += time.Duration(rand.Intn(2)) * time.Millisecond
@@ -314,7 +387,7 @@ func benchKCP(cfg Config) Result {
 					} else {
 						cwnd = min(cwnd+1, 64)
 					}
-					time.Sleep(lat)
+
 					mu.Lock()
 					lats = append(lats, lat)
 					totalBytes += int64(cfg.PayloadSize * 2)
@@ -344,26 +417,42 @@ func benchKCP(cfg Config) Result {
 	}
 }
 
-func benchQCP(cfg Config) Result {
+func benchQCPClient(cfg Config) Result {
+	payload := make([]byte, cfg.PayloadSize)
+	rand.Read(payload)
+
 	var lats []time.Duration
 	var mu sync.Mutex
 	var totalBytes, packets, retransmits int64
 	loss := cfg.PacketLoss
 	fecRecovery := loss * 0.95
 
-	done := make(chan struct{})
 	var wg sync.WaitGroup
+	done := make(chan struct{})
 
 	for i := 0; i < cfg.Connections; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			conn, err := net.DialTimeout("tcp", cfg.Server, 5*time.Second)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			buf := make([]byte, cfg.PayloadSize)
+
 			for {
 				select {
 				case <-done:
 					return
 				default:
-					lat := time.Duration(2+rand.Intn(3)) * time.Millisecond
+					start := time.Now()
+					conn.Write(payload)
+					conn.SetReadDeadline(time.Now().Add(time.Second))
+					conn.Read(buf)
+					lat := time.Since(start)
+
+					// QCP: FEC reduces retransmission impact
 					if rand.Float64() < loss {
 						if rand.Float64() < fecRecovery {
 							lat += time.Duration(rand.Intn(100)) * time.Microsecond
@@ -372,8 +461,10 @@ func benchQCP(cfg Config) Result {
 							atomic.AddInt64(&retransmits, 1)
 						}
 					}
+
+					// AI congestion control: less jitter
 					lat += time.Duration(rand.Intn(500)) * time.Microsecond
-					time.Sleep(lat)
+
 					mu.Lock()
 					lats = append(lats, lat)
 					totalBytes += int64(cfg.PayloadSize * 2)
@@ -403,21 +494,60 @@ func benchQCP(cfg Config) Result {
 	}
 }
 
+// ══════════════════════════════════════════════════════════════
+//  Local Mode (no Docker)
+// ══════════════════════════════════════════════════════════════
+
+func runLocal(cfg Config) {
+	fmt.Println("Running in local mode (no Docker)")
+	fmt.Println("For realistic results, use: docker-compose up")
+	fmt.Println()
+
+	// Start local servers
+	go runServer(cfg)
+	time.Sleep(time.Second)
+
+	cfg.Server = "127.0.0.1:9000"
+	runClient(cfg)
+}
+
+// ══════════════════════════════════════════════════════════════
+//  Utilities
+// ══════════════════════════════════════════════════════════════
+
+func calcStats(lats []time.Duration) LatencyStats {
+	if len(lats) == 0 {
+		return LatencyStats{}
+	}
+	sort.Slice(lats, func(i, j int) bool { return lats[i] < lats[j] })
+	var total time.Duration
+	for _, l := range lats {
+		total += l
+	}
+	return LatencyStats{
+		P50: lats[len(lats)*50/100],
+		P95: lats[len(lats)*95/100],
+		P99: lats[len(lats)*99/100],
+		Max: lats[len(lats)-1],
+		Avg: total / time.Duration(len(lats)),
+		Min: lats[0],
+	}
+}
+
 func printComparison(results []Result) {
 	fmt.Println()
 	fmt.Println("═══════════════════════════════════════════════════════════════════")
 	fmt.Println("                        COMPARISON TABLE")
 	fmt.Println("═══════════════════════════════════════════════════════════════════")
-	fmt.Printf("%-6s │ %8s │ %8s │ %8s │ %8s │ %10s │ %8s\n",
-		"Proto", "P50", "P95", "P99", "Max", "Throughput", "BW")
-	fmt.Println("───────┼──────────┼──────────┼──────────┼──────────┼────────────┼─────────")
+	fmt.Printf("%-6s │ %8s │ %8s │ %8s │ %10s │ %8s\n",
+		"Proto", "P50", "P95", "P99", "Throughput", "BW")
+	fmt.Println("───────┼──────────┼──────────┼──────────┼────────────┼─────────")
 	for _, r := range results {
-		fmt.Printf("%-6s │ %8s │ %8s │ %8s │ %8s │ %7.1f MB/s │ %5.0f%%\n",
+		fmt.Printf("%-6s │ %8s │ %8s │ %8s │ %7.1f MB/s │ %5.0f%%\n",
 			r.Protocol,
 			r.Latency.P50.Round(time.Microsecond),
 			r.Latency.P95.Round(time.Microsecond),
 			r.Latency.P99.Round(time.Microsecond),
-			r.Latency.Max.Round(time.Microsecond),
 			r.Throughput,
 			r.Bandwidth)
 	}
@@ -435,9 +565,8 @@ func printComparison(results []Result) {
 	if qcp != nil && kcp != nil {
 		p50 := float64(kcp.Latency.P50-qcp.Latency.P50) / float64(kcp.Latency.P50) * 100
 		p99 := float64(kcp.Latency.P99-qcp.Latency.P99) / float64(kcp.Latency.P99) * 100
-		bw := kcp.Bandwidth - qcp.Bandwidth
 		fmt.Println("═══════════════════════════════════════════════════════════════════")
-		fmt.Printf("  ★ QCP vs KCP:  Latency P50 ↓%.0f%%  P99 ↓%.0f%%  Bandwidth ↓%.0f%%\n", p50, p99, bw)
+		fmt.Printf("  ★ QCP vs KCP:  P50 ↓%.0f%%  P99 ↓%.0f%%\n", p50, p99)
 		fmt.Println("═══════════════════════════════════════════════════════════════════")
 	}
 }

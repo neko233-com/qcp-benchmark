@@ -1,0 +1,29 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    networks:
+      qcp-net:
+        ipv4_address: 10.10.0.10
+    command: ["-mode", "server"]
+
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    networks:
+      qcp-net:
+        ipv4_address: 10.10.0.20
+    depends_on:
+      - server
+    cap_add:
+      - NET_ADMIN
+    command: ["-server", "10.10.0.10:9000"]
+
+networks:
+  qcp-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.10.0.0/24
