@@ -12,8 +12,9 @@
 | **最终 Docker** | `.\scripts\verify-docker.ps1` | `10.10.0.0/24` bridge + **tc/netem** |
 | **最终本机网卡** | `.\scripts\verify-host.ps1` | 绑定 LAN IP，**拒绝 127.0.0.1** |
 
-`-verify-net` 使用真实 UDP（`qcp-lib-go` :9003），**禁止 loopback**。  
-判定：**P50 为主**（QCP ≤ KCP+5%）；丢包 ≥3% 场景额外检查 P99。
+`-verify-net` 使用真实网络（`qcp-lib-go` :9003），**禁止 loopback**。  
+判定：**P50 为主**（QCP ≤ KCP+5%）；丢包 ≥3% 场景额外检查 P99。  
+每次验证会生成 `性能对比表格.md`，只保留 `QCP / TCP / KCP`，不包含 UDP。
 
 ## 快速 CI（仿真）
 
@@ -31,6 +32,7 @@ bash scripts/verify-docker.sh 20 5s
 - Server: `10.10.0.10`（`qcp-lib-go` 官方栈 `:9003`）
 - Client: `10.10.0.20` + `netem.sh` 按场景注入 delay/loss
 - `-verify-net` 拒绝 loopback
+- 验证完成后会刷新 `性能对比表格.md`
 
 单场景：
 

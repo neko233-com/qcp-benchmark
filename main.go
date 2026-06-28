@@ -1,6 +1,6 @@
 package main
 
-// QCP Benchmark — QCP vs baseline opponents (KCP / TCP / UDP).
+// QCP Benchmark — QCP vs baseline opponents (KCP / TCP).
 //
 // KCP code in baseline_kcp.go exists ONLY to simulate the legacy protocol
 // for comparison tests. QCP does NOT depend on KCP. Use qcp-lib-* in production.
@@ -59,11 +59,11 @@ func UnmarshalQCP(data []byte) *QCPPacket {
 		return nil
 	}
 	return &QCPPacket{
-		Flags:  data[0],
-		Stream: data[1],
-		SeqID:  binary.LittleEndian.Uint16(data[2:4]),
-		FECID:  data[4],
-		TSDiff: binary.LittleEndian.Uint16(data[5:7]),
+		Flags:   data[0],
+		Stream:  data[1],
+		SeqID:   binary.LittleEndian.Uint16(data[2:4]),
+		FECID:   data[4],
+		TSDiff:  binary.LittleEndian.Uint16(data[5:7]),
 		Payload: data[7:],
 	}
 }
@@ -105,7 +105,7 @@ type Result struct {
 func main() {
 	mode := flag.String("mode", "all", "Mode: server, client, all")
 	server := flag.String("server", "", "Server address")
-	protocol := flag.String("protocol", "all", "Protocol: qcp, tcp, udp, kcp, all")
+	protocol := flag.String("protocol", "all", "Protocol: qcp, tcp, kcp, all")
 	duration := flag.Duration("duration", 10*time.Second, "Test duration")
 	conns := flag.Int("connections", 100, "Connections")
 	payload := flag.Int("payload", 256, "Payload size")
@@ -241,7 +241,7 @@ func runClient(cfg Config) {
 	fmt.Printf("Server: %s | Duration: %v | Conns: %d | Loss: %.0f%%\n\n",
 		cfg.Server, cfg.Duration, cfg.Connections, cfg.PacketLoss*100)
 
-	protos := []string{"tcp", "udp", "kcp", "qcp"}
+	protos := []string{"tcp", "kcp", "qcp"}
 	if cfg.Protocol != "all" {
 		protos = []string{cfg.Protocol}
 	}
@@ -259,6 +259,13 @@ func runClient(cfg Config) {
 	}
 
 	printComparison(results)
+	if err := writeComparisonMarkdown(comparisonReportFile, []ComparisonSection{{
+		Title:    "场景：local",
+		Subtitle: "本地压测结果，只保留 QCP / TCP / KCP；UDP 不纳入对比。",
+		Results:  results,
+	}}); err != nil {
+		fmt.Fprintf(os.Stderr, "write markdown report: %v\n", err)
+	}
 	data, _ := json.MarshalIndent(results, "", "  ")
 	os.WriteFile("/results.json", data, 0644)
 }

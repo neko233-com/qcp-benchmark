@@ -194,7 +194,7 @@ func runVerifyNet(cfg Config) error {
 	}
 
 	fmt.Println("╔═══════════════════════════════════════════════════════════════╗")
-	fmt.Println("║  QCP VERIFY-NET — real UDP via bridge / NIC (no loopback)    ║")
+	fmt.Println("║  QCP VERIFY-NET — real network via bridge / NIC (no loopback) ║")
 	fmt.Println("╚═══════════════════════════════════════════════════════════════╝")
 	fmt.Printf("  Server: %s | Scenario: %s\n\n", cfg.Server, cfg.Scenario)
 
@@ -208,9 +208,22 @@ func runVerifyNet(cfg Config) error {
 		cfg.PayloadSize = 256
 	}
 
+	tcp := benchTCP(cfg)
 	kcp := benchKCPNet(cfg)
 	qcp := benchQCPLibNet(cfg)
 
+	sections := []ComparisonSection{{
+		Title:    fmt.Sprintf("场景：%s", cfg.Scenario),
+		Subtitle: "真实网络验证，TCP 使用 :9000，KCP / QCP 使用各自基线端口。",
+		Results: []Result{
+			{Protocol: "tcp", Scenario: cfg.Scenario, Latency: tcp.Latency, Throughput: tcp.Throughput, Bandwidth: tcp.Bandwidth, Connections: tcp.Connections},
+			{Protocol: "kcp", Scenario: cfg.Scenario, Latency: kcp.Latency, Throughput: kcp.Throughput, Bandwidth: kcp.Bandwidth, Connections: kcp.Connections},
+			{Protocol: "qcp", Scenario: cfg.Scenario, Latency: qcp.Latency, Throughput: qcp.Throughput, Bandwidth: qcp.Bandwidth, Connections: qcp.Connections},
+		},
+	}}
+
+	fmt.Printf("  TCP P50=%v P99=%v pkts=%d\n",
+		tcp.Latency.P50.Round(time.Microsecond), tcp.Latency.P99.Round(time.Microsecond), tcp.PacketsSent)
 	fmt.Printf("  KCP P50=%v P99=%v pkts=%d\n",
 		kcp.Latency.P50.Round(time.Microsecond), kcp.Latency.P99.Round(time.Microsecond), kcp.PacketsSent)
 	fmt.Printf("  QCP P50=%v P99=%v pkts=%d\n",
@@ -237,6 +250,9 @@ func runVerifyNet(cfg Config) error {
 		fmt.Println("\nVERIFY-NET FAILED:", failed)
 		return fmt.Errorf("verify-net failed: %v", failed)
 	}
+	if err := writeComparisonMarkdown(comparisonReportFile, sections); err != nil {
+		return err
+	}
 	if qcp.Latency.P50 > 0 && kcp.Latency.P50 > 0 {
 		improve := float64(kcp.Latency.P50-qcp.Latency.P50) / float64(kcp.Latency.P50) * 100
 		fmt.Printf("\n✓ VERIFY-NET PASS — P50 ↓%.0f%% vs KCP on real network\n", improve)
@@ -262,12 +278,43 @@ func runVerifyNetAll(cfg Config) error {
 	fmt.Println("╚═══════════════════════════════════════════════════════════════╝")
 
 	var failed []string
+	var sections []ComparisonSection
 	for _, name := range allProfileNames() {
 		fmt.Printf("\n── scenario: %s ──\n", name)
 		c := cfg
 		c.Scenario = name
-		if err := runVerifyNet(c); err != nil {
-			failed = append(failed, name+": "+err.Error())
+
+		tcp := benchTCP(c)
+		kcp := benchKCPNet(c)
+		qcp := benchQCPLibNet(c)
+
+		sections = append(sections, ComparisonSection{
+			Title:    fmt.Sprintf("场景：%s", name),
+			Subtitle: "真实网络验证，TCP 使用 :9000，KCP / QCP 使用各自基线端口。",
+			Results: []Result{
+				{Protocol: "tcp", Scenario: name, Latency: tcp.Latency, Throughput: tcp.Throughput, Bandwidth: tcp.Bandwidth, Connections: tcp.Connections},
+				{Protocol: "kcp", Scenario: name, Latency: kcp.Latency, Throughput: kcp.Throughput, Bandwidth: kcp.Bandwidth, Connections: kcp.Connections},
+				{Protocol: "qcp", Scenario: name, Latency: qcp.Latency, Throughput: qcp.Throughput, Bandwidth: qcp.Bandwidth, Connections: qcp.Connections},
+			},
+		})
+
+		fmt.Printf("  TCP P50=%v P99=%v | KCP P50=%v P99=%v | QCP P50=%v P99=%v\n",
+			tcp.Latency.P50.Round(time.Microsecond), tcp.Latency.P99.Round(time.Microsecond),
+			kcp.Latency.P50.Round(time.Microsecond), kcp.Latency.P99.Round(time.Microsecond),
+			qcp.Latency.P50.Round(time.Microsecond), qcp.Latency.P99.Round(time.Microsecond))
+
+		profile := profileByName(name)
+		if qcp.PacketsSent == 0 {
+			failed = append(failed, name+": QCP no packets")
+		}
+		if kcp.PacketsSent == 0 {
+			failed = append(failed, name+": KCP no packets")
+		}
+		if qcp.Latency.P50 > time.Duration(float64(kcp.Latency.P50)*1.05) {
+			failed = append(failed, fmt.Sprintf("%s: P50 QCP(%v) > KCP(%v)+5%%", name, qcp.Latency.P50, kcp.Latency.P50))
+		}
+		if profile.Loss >= 0.03 && qcp.Latency.P99 > time.Duration(float64(kcp.Latency.P99)*1.25) {
+			failed = append(failed, fmt.Sprintf("%s: P99 QCP(%v) > KCP(%v)+25%% (loss≥3%%)", name, qcp.Latency.P99, kcp.Latency.P99))
 		}
 	}
 	if len(failed) > 0 {
@@ -277,7 +324,10 @@ func runVerifyNetAll(cfg Config) error {
 		}
 		return fmt.Errorf("%d scenarios failed", len(failed))
 	}
-	fmt.Println("\n✓ ALL NETWORK SCENARIOS PASS ON REAL UDP")
+	if err := writeComparisonMarkdown(comparisonReportFile, sections); err != nil {
+		return err
+	}
+	fmt.Println("\n✓ ALL NETWORK SCENARIOS PASS ON REAL NETWORK")
 	return nil
 }
 
